@@ -54,5 +54,11 @@ class constantsHotPointDrill(object):
         self.etaw = 1.5e-3                      # Dynamic viscosity of water (Pa s); Engineering Toolbox
         self.mmass_w = 18.02                    # Molar mass of water (g mol-1)
         self.alphaw = self.kw/(self.rhow*self.cw)
+        # probe
+        self.rho_probe = 8050.                  # Density of probe (kg m-3)
+        self.k_probe = 50.2                     # Thermal conductivity of probe (J m-1 K-1 s-1)
+        self.c_probe = 466.                     # Heat capacity of probe (J kg-1 K-1)
+        self.alpha_probe = self.k_probe/(self.rho_probe*self.c_probe)
+
         # freezing point depression
         self.Kf = -1.99                         # Freezing point depression constant for ethanol in water

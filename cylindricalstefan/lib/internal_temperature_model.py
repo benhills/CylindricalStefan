@@ -39,7 +39,7 @@ class internal_temperature_model():
         self.Q_initialize = 2500.               # Heat Source for Melting (W)
 
         # Domain Specifications
-        self.R_center = 0.01                    # Inner Domain Edge (m)
+        self.R_center = 0.001                    # Inner Domain Edge (m)
         self.R_inf = 1.                         # Outer Domain Edge (m)
         self.R_melt = 0.04                      # Melt-Out Radius (m)
         self.n = 100                            # Mesh resolution
@@ -66,6 +66,8 @@ class internal_temperature_model():
         self.Qstar = self.Q_wall/(2.*np.pi*const.ki*abs(self.T_inf))            # Dimensionless heat source for melting
         Lv = const.L*const.rhoi                                                 # Latent heat of fusion per unit volume
         self.astar_i = Lv/(const.rhoi*const.ci*abs(self.T_inf))                 # Thermal diffusivity of ice
+        diff_ratio = (const.k_probe*const.rhoi*const.ci)/(const.ki*const.rho_probe*const.c_probe)
+        self.astar_probe = diff_ratio*self.astar_i                              # Thermal diffusivity of probe
         self.t0 = const.rhoi*const.ci/const.ki*self.astar_i*self.R_melt**2.     # Characteristic time (~freeze time)
 
         # Tranform to a logarithmic coordinate system so that there are more points near the borehole wall.
@@ -84,7 +86,11 @@ class internal_temperature_model():
         self.mesh = dolfin.IntervalMesh(self.n,self.w0,self.wf)
         self.V = dolfin.FunctionSpace(self.mesh,'CG',1)
         self.coords = self.V.tabulate_dof_coordinates().copy()
-        self.idx_wall = np.argmin(abs(self.Rstar-self.coords))
+        # TODO: is this used?
+        self.idx_probe = np.argmin(abs(self.Rstar-self.coords))
+
+        # TODO: define a variable diffusivity for the probe/ice
+        self.astar = dolfin.project(dolfin.Expression('astar_i',degree=1,astar_i=self.astar_i),self.V)
 
         self.flags.append('get_domain')
 
@@ -97,9 +103,9 @@ class internal_temperature_model():
 
         # --- Initial states --- #
         # ice temperature
-        self.u0_i = dolfin.Function(self.V)
-        T,lam,self.R_melt,self.t_melt = analyticalMelt(np.exp(self.ice_coords[:,0])*self.R_melt,self.T_inf,self.Q_initialize,R_target=self.R_melt)
-        self.u0_i.vector()[:] = T/abs(self.T_inf)
+        self.u0 = dolfin.Function(self.V)
+        T,lam,self.R_melt,self.t_melt = analyticalMelt(np.exp(self.coords[:,0])*self.R_melt,self.T_inf,self.Q_initialize,R_target=self.R_melt)
+        self.u0.vector()[:] = T/abs(self.T_inf)
 
         # --- Time Array --- #
         # Now that we have the melt-out time, we can define the time array
@@ -107,9 +113,9 @@ class internal_temperature_model():
         self.dt /= self.t0
 
         # --- Define the test and trial functions --- #
-        self.u_i = dolfin.TrialFunction(self.V)
-        self.v_i = dolfin.TestFunction(self.V)
-        self.T_i = dolfin.Function(self.V)
+        self.u = dolfin.TrialFunction(self.V)
+        self.v = dolfin.TestFunction(self.V)
+        self.T = dolfin.Function(self.V)
 
         self.flags.append('get_ic')
 
@@ -126,7 +132,7 @@ class internal_temperature_model():
         # Initialize boundary classes
         mod.Inf = Inf()
         # Set the Dirichlet Boundary condition at
-        mod.bc_inf = dolfin.DirichletBC(mod.ice_V, mod.Tstar, mod.Inf)
+        mod.bc_inf = dolfin.DirichletBC(mod.V, mod.Tstar, mod.Inf)
 
         mod.flags.append('get_bc')
 
@@ -137,16 +143,14 @@ class internal_temperature_model():
         Solve the thermal diffusion problem.
         """
 
-        # thermal diffusivity in log coordinates
-        alphalog_i = dolfin.project(dolfin.Expression('astar*exp(-2.*x[0])',degree=1,astar=self.astar_i),self.ice_V)
         # Set up the variational form for the current mesh location
-        F_i = (self.u_i-self.u0_i)*self.v_i*dolfin.dx + self.dt*dolfin.inner(dolfin.grad(self.u_i), dolfin.grad(alphalog_i*self.v_i))*dolfin.dx
-        a_i = dolfin.lhs(F_i)
-        L_i = dolfin.rhs(F_i)
+        F = (self.u-self.u0)*self.v*dolfin.dx + self.dt*dolfin.inner(dolfin.grad(self.u), dolfin.grad(self.alpha*self.v))*dolfin.dx
+        a = dolfin.lhs(F)
+        L = dolfin.rhs(F)
         # Solve ice temperature
-        dolfin.solve(a_i==L_i,self.T_i,[self.bc_inf,self.bc_iWall])
+        dolfin.solve(a==L,self.T,[self.bc_inf,self.bc_iWall])
         # Update previous profile to current
-        self.u0_i.assign(self.T_i)
+        self.u0.assign(self.T)
 
     # ----------------------------------------------------------------------------------------------------------------------------------------
 
@@ -157,8 +161,8 @@ class internal_temperature_model():
 
         # Initialize outputs
         if initialize_array:
-            self.r_ice_result = [np.exp(self.ice_coords[:,0])*self.R_melt]
-            self.T_ice_result = [np.array(self.u0_i.vector()[:]*abs(self.T_inf))]
+            self.r_result = [np.exp(self.coords[:,0])*self.R_melt]
+            self.T_result = [np.array(self.u0.vector()[:]*abs(self.T_inf))]
         for i,t in enumerate(self.ts[1:]):
             if verbose:
                 print(round(t*self.t0/60.),end=' min, ')
@@ -169,5 +173,5 @@ class internal_temperature_model():
 
             # --- Export --- #
             if t in self.save_times:
-                self.r_ice_result = np.append(self.r_ice_result,[np.exp(self.ice_coords[:,0])*self.R_melt],axis=0)
-                self.T_ice_result = np.append(self.T_ice_result,[self.u0_i.vector()[:]*abs(self.T_inf)],axis=0)
+                self.r_result = np.append(self.r_result,[np.exp(self.coords[:,0])*self.R_melt],axis=0)
+                self.T_result = np.append(self.T_result,[self.u0.vector()[:]*abs(self.T_inf)],axis=0)
