@@ -72,7 +72,7 @@ class internal_temperature_model():
 
         # Tranform to a logarithmic coordinate system so that there are more points near the borehole wall.
         self.w0 = np.log(self.Rstar_center)                                            # Log dimensionless inner domain edge
-        self.w_melt = np.log(self.Rstar)                                            # Log dimensionless melt-out radius
+        self.w_probe = np.log(self.Rstar)                                            # Log dimensionless melt-out radius
         self.wf = np.log(self.Rstar_inf)                                        # Log dimensionless outer domain edge
 
         self.flags.append('log_transform')
@@ -86,11 +86,11 @@ class internal_temperature_model():
         self.mesh = dolfin.IntervalMesh(self.n,self.w0,self.wf)
         self.V = dolfin.FunctionSpace(self.mesh,'CG',1)
         self.coords = self.V.tabulate_dof_coordinates().copy()
-        # TODO: is this used?
-        self.idx_probe = np.argmin(abs(self.Rstar-self.coords))
 
-        # TODO: define a variable diffusivity for the probe/ice
-        self.astar = dolfin.project(dolfin.Expression('astar_i',degree=1,astar_i=self.astar_i),self.V)
+        # Define a variable diffusivity for the probe/ice
+        self.astar = dolfin.project(dolfin.Expression('x[0] < w_probe ? astar_probe : astar_i',
+                                                    degree=1,w_probe=self.w_probe,astar_i=self.astar_i,
+                                                    astar_probe=self.astar_probe),self.V)
 
         self.flags.append('get_domain')
 
@@ -111,6 +111,7 @@ class internal_temperature_model():
         # Now that we have the melt-out time, we can define the time array
         self.ts = np.arange(self.t_melt,self.t_final+self.dt,self.dt)/self.t0
         self.dt /= self.t0
+        self.save_times = self.ts[::len(self.ts)//100]
 
         # --- Define the test and trial functions --- #
         self.u = dolfin.TrialFunction(self.V)
@@ -143,12 +144,14 @@ class internal_temperature_model():
         Solve the thermal diffusion problem.
         """
 
+        # Convert diffusivity into these logarithmic coordinates
+        alphalog = dolfin.project(dolfin.Expression('astar*exp(-2.*x[0])',degree=1,astar=self.astar),self.V)
         # Set up the variational form for the current mesh location
-        F = (self.u-self.u0)*self.v*dolfin.dx + self.dt*dolfin.inner(dolfin.grad(self.u), dolfin.grad(self.alpha*self.v))*dolfin.dx
+        F = (self.u-self.u0)*self.v*dolfin.dx + self.dt*dolfin.inner(dolfin.grad(self.u), dolfin.grad(alphalog*self.v))*dolfin.dx
         a = dolfin.lhs(F)
         L = dolfin.rhs(F)
         # Solve ice temperature
-        dolfin.solve(a==L,self.T,[self.bc_inf,self.bc_iWall])
+        dolfin.solve(a==L,self.T,self.bc_inf)
         # Update previous profile to current
         self.u0.assign(self.T)
 
@@ -168,7 +171,6 @@ class internal_temperature_model():
                 print(round(t*self.t0/60.),end=' min, ')
 
             # --- Thermal Diffusion --- #
-            self.update_boundary_conditions(data_dir=data_dir)
             self.solve_thermal()
 
             # --- Export --- #
